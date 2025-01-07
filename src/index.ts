@@ -24,6 +24,29 @@ const KNOWN_VALUES = new Map<string, boolean | null | undefined | number>([
 
 const BIGINT_REGEX = /^-?\d+n$/i;
 
+function cleanObject(obj: any): any {
+  if (typeof obj !== "object" || obj === null) {
+    return obj;
+  }
+
+  if (Array.isArray(obj)) {
+    return obj.map((item) => cleanObject(item));
+  }
+
+  const result: any = {};
+  for (const key of Object.keys(obj)) {
+    if (key === "__proto__") {
+      continue;
+    }
+    result[key] = cleanObject(obj[key]);
+  }
+  return result;
+}
+
+function checkPrototypePollution(value: string): boolean {
+  return suspectProtoRx.test(value) || suspectConstructorRx.test(value);
+}
+
 export function synapse<T = unknown>(value: any, options: Options = {}): T {
   if (typeof value !== "string") {
     return value;
@@ -33,21 +56,34 @@ export function synapse<T = unknown>(value: any, options: Options = {}): T {
   const len = _value.length;
 
   if (len <= 10) {
-    const knownValue = KNOWN_VALUES.get(_value);
-    if (knownValue !== undefined) {
+    const lowerValue = _value.toLowerCase();
+    const knownValue = KNOWN_VALUES.get(lowerValue);
+    if (
+      knownValue !== undefined ||
+      lowerValue === "null" ||
+      lowerValue === "undefined"
+    ) {
       return knownValue as T;
     }
   }
 
-  if (len === 2 && _value.codePointAt(0) === 34 /* " */) {
-    return "" as T;
-  }
+  if (_value[0] === '"') {
+    if (options.strict && (!_value.endsWith('"') || len < 2)) {
+      throw new SyntaxError("[synapse] Invalid JSON");
+    }
 
-  if (
-    _value.codePointAt(0) === 34 /* " */ &&
-    _value.codePointAt(len - 1) === 34 /* " */
-  ) {
-    return _value.slice(1, -1) as T;
+    if (len === 2 && _value[1] === '"') {
+      return "" as T;
+    }
+
+    try {
+      return JSON.parse(_value) as T;
+    } catch {
+      if (options.strict) {
+        throw new SyntaxError("[synapse] Invalid JSON");
+      }
+      return value as T;
+    }
   }
 
   if (BIGINT_REGEX.test(_value)) {
@@ -61,22 +97,25 @@ export function synapse<T = unknown>(value: any, options: Options = {}): T {
     }
   }
 
-  const firstChar = _value.codePointAt(0);
+  const firstChar = _value[0];
 
   if (
-    firstChar === 91 /* [ */ ||
-    firstChar === 123 /* { */ ||
-    firstChar === 34 /* " */ ||
+    firstChar === "[" ||
+    firstChar === "{" ||
+    firstChar === '"' ||
     leadingDigitRegex.test(_value)
   ) {
     try {
-      if (
-        options.strict &&
-        (suspectProtoRx.test(value) || suspectConstructorRx.test(value))
-      ) {
-        throw new Error("[synapse] Possible prototype pollution");
+      if (checkPrototypePollution(_value)) {
+        /* eslint-disable no-console */
+        console.warn("[synapse] Possible prototype pollution");
+        /* eslint-enable no-console */
+        if (options.strict) {
+          throw new Error("[synapse] Possible prototype pollution");
+        }
       }
-      return JSON.parse(value) as T;
+      const parsed = JSON.parse(_value);
+      return cleanObject(parsed) as T;
     } catch (error) {
       if (options.strict) {
         throw error;
